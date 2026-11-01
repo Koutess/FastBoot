@@ -1,0 +1,165 @@
+plugins {
+    // Minecraft 1.21 through 1.21.11 use the remapping Loom plugin.
+    id 'fabric-loom' version '1.14.10'
+}
+
+// Use Loom's legacy Mixin annotation processor for strict compile-time selector
+// validation and a named refmap. CI builds every supported Minecraft version.
+loom {
+    accessWidenerPath = file('src/main/resources/fastboot.accesswidener')
+    mixin {
+        useLegacyMixinAp = true
+        defaultRefmapName = 'fastboot.refmap.json'
+    }
+}
+
+// Explicit allowlist prevents accidental builds for unsupported game versions.
+def supportedMinecraftVersions = [
+    '1.21',
+    '1.21.1',
+    '1.21.2',
+    '1.21.3',
+    '1.21.4',
+    '1.21.5',
+    '1.21.6',
+    '1.21.7',
+    '1.21.8',
+    '1.21.9',
+    '1.21.10',
+    '1.21.11'
+] as Set
+
+def mcVersion = providers.gradleProperty('minecraft_version')
+        .map { it.trim() }
+        .getOrElse('1.21.11')
+
+if (!supportedMinecraftVersions.contains(mcVersion)) {
+    throw new GradleException(
+        "Unsupported Minecraft version '${mcVersion}'. " +
+        "FastBoot 1.1.1 builds separately for: ${supportedMinecraftVersions.join(', ')}"
+    )
+}
+
+// Mojang renamed ResourceLocation to Identifier in 1.21.11. Select the
+// matching source adapter instead of trying to compile one incompatible source.
+sourceSets.main.java.srcDir(
+    mcVersion == '1.21.11'
+        ? 'src/versions/1.21.11/java'
+        : 'src/versions/pre-1.21.11/java'
+)
+
+version = "${project.mod_version}+mc${mcVersion}"
+group = project.maven_group
+
+base {
+    archivesName = project.archives_base_name
+}
+
+repositories {
+    maven { url = 'https://maven.fabricmc.net/' }
+    mavenCentral()
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${mcVersion}"
+    mappings loom.officialMojangMappings()
+    modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.12.2'
+    // Gradle 9 requires the JUnit Platform launcher on the test runtime classpath.
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.12.2'
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+    withSourcesJar()
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.release = 21
+    options.encoding = 'UTF-8'
+}
+
+tasks.withType(Test).configureEach {
+    useJUnitPlatform()
+}
+
+processResources {
+    def props = [
+        version: project.version,
+        minecraft_version: mcVersion
+    ]
+    inputs.properties props
+    filesMatching('fabric.mod.json') {
+        expand props
+    }
+}
+
+jar {
+    from('LICENSE') {
+        rename { "${it}_${project.archives_base_name}" }
+    }
+}
+
+// Verify the *remapped* user-facing artifact, not just the development jar.
+tasks.register('verifyFastBootArtifact') {
+    dependsOn tasks.named('remapJar')
+
+    doLast {
+        def artifact = tasks.named('remapJar').get().archiveFile.get().asFile
+        if (!artifact.isFile()) {
+            throw new GradleException("Remapped FastBoot artifact not found: ${artifact}")
+        }
+
+        def zip = new java.util.zip.ZipFile(artifact)
+        try {
+            def metadataEntry = zip.getEntry('fabric.mod.json')
+            def mixinEntry = zip.getEntry('fastboot.mixins.json')
+            def refmapEntry = zip.getEntry('fastboot.refmap.json')
+            if (metadataEntry == null || mixinEntry == null || refmapEntry == null) {
+                throw new GradleException('Remapped JAR is missing metadata, mixin config, or generated refmap')
+            }
+
+            def metadata
+            zip.getInputStream(metadataEntry).withCloseable { input ->
+                metadata = new groovy.json.JsonSlurper().parse(input)
+            }
+            if (metadata.id != 'fastboot' || metadata.depends.minecraft != mcVersion) {
+                throw new GradleException("Artifact metadata does not match Minecraft ${mcVersion}")
+            }
+
+            def mixinConfig
+            zip.getInputStream(mixinEntry).withCloseable { input ->
+                mixinConfig = new groovy.json.JsonSlurper().parse(input)
+            }
+            def expectedMixins = ['FilePackResourcesMixin', 'PathPackResourcesMixin', 'TitleScreenFadeMixin'] as Set
+            def actualMixins = new LinkedHashSet(mixinConfig.client ?: [])
+            if (actualMixins != expectedMixins) {
+                throw new GradleException("Unexpected client mixin list: ${mixinConfig.client}")
+            }
+            ['dev/fastboot/mixin/FilePackResourcesMixin.class',
+             'dev/fastboot/mixin/PathPackResourcesMixin.class',
+             'dev/fastboot/mixin/TitleScreenFadeMixin.class',
+             'dev/fastboot/resources/ZipPackIndex.class',
+             'dev/fastboot/resources/DirectoryPackIndex.class'].each { classPath ->
+                if (zip.getEntry(classPath) == null) {
+                    throw new GradleException("Remapped JAR is missing ${classPath}")
+                }
+            }
+            if (zip.getEntry('dev/fastboot/mixin/DataFixersMixin.class') != null) {
+                throw new GradleException('The obsolete DataFixer startup shortcut must not be packaged')
+            }
+            if (zip.getEntry('fastboot.accesswidener') == null) {
+                throw new GradleException('Remapped JAR is missing its access widener')
+            }
+            if (mixinConfig.required != false || mixinConfig.refmap != 'fastboot.refmap.json') {
+                throw new GradleException('Mixin config must be fail-open and point at the generated refmap')
+            }
+        } finally {
+            zip.close()
+        }
+
+        logger.lifecycle("Verified remapped FastBoot artifact for Minecraft ${mcVersion}: ${artifact.name}")
+    }
+}

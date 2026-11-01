@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "fastboot",
+  "version": "${version}",
+  "name": "FastBoot",
+  "description": "Client-side startup optimization for caching ZIP-backed and directory-backed resource-pack listings while preserving normal Minecraft loading.",
+  "authors": [
+    "FastBoot contributors"
+  ],
+  "license": "MIT",
+  "environment": "client",
+  "mixins": [
+    "fastboot.mixins.json"
+  ],
+  "accessWidener": "fastboot.accesswidener",
+  "depends": {
+    "fabricloader": ">=0.18.1",
+    "minecraft": "${minecraft_version}",
+    "java": ">=21"
+  }
+}
