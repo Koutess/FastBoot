@@ -1,0 +1,60 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v1.*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Minecraft ${{ matrix.minecraft }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        minecraft: ["1.21", "1.21.1", "1.21.2", "1.21.3", "1.21.4", "1.21.5", "1.21.6", "1.21.7", "1.21.8", "1.21.9", "1.21.10", "1.21.11"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '9.2.1'
+      - name: Run tests and build version-specific remapped mod
+        run: gradle --no-daemon clean validateAccessWidener test build verifyFastBootArtifact -Pminecraft_version='${{ matrix.minecraft }}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fastboot-${{ matrix.minecraft }}
+          path: build/libs/fastboot-1.1.1+mc${{ matrix.minecraft }}.jar
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: fastboot-*
+          path: dist
+          merge-multiple: true
+      - name: Verify complete 12-version release bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          count=$(find dist -maxdepth 1 -type f -name '*.jar' | wc -l)
+          if [ "$count" -ne 12 ]; then
+            echo "Expected 12 version-specific JARs, found $count"
+            find dist -maxdepth 1 -type f -print
+            exit 1
+          fi
+          ls -lh dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.jar
+          generate_release_notes: true
+          draft: true
